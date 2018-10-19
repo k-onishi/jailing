@@ -9,12 +9,20 @@ require 'syscall.ph';
 
 our $VERSION = '0.02';
 
+# -xのオプション一覧: http://perldoc.jp/func/-d
+# open: https://www.javadrive.jp/perlfunc/io/index1.html
+# regex: https://rfs.jp/sb/perl/02/09.html
+
+# qw(): 配列の初期化関数
+# our: グローバル変数の宣言
 our @NEWDIRS = qw(
     etc
     run
     usr
     var/log
 );
+
+# grep -d: ディレクトリとして存在するものだけを抽出？
 our @BINDDIRS = grep { -d "/$_" } qw(
     bin
     etc/alternatives
@@ -40,14 +48,28 @@ our @COPYFILES = qw(
     etc/resolv.conf
     etc/hosts
 );
+
+# mapを使用してハッシュ変数に変換
+# $VAR1 = {
+#     '6' => 1,
+#     '7' => 1,
+#     '10' => 1
+# };
 our %KEEP_CAPS = map { $_ => 1 } (
     6,  # CAP_SETGID
     7,  # CAP_SETUID
     10, # CAP_NET_BIND_SERVICE
 );
 
+# $: スカラ変数
+# @: 配列
+# %: ハッシュ
 my ($root, @bind, @robind, $opt_umount);
 
+# コマンドラインオプションをバインド
+# var=s: 文字列
+# var=i: 数値
+# var: 真偽値
 GetOptions(
     'root=s'   => \$root,
     'bind=s'   => \@bind,
@@ -62,6 +84,7 @@ GetOptions(
     },
 ) or exit(1);
 
+# コンテナのルートディレクトリが指定されているか、全体パスであるかどうかの確認
 # cleanup $root
 die "--root not specified\n"
     unless $root;
@@ -69,6 +92,7 @@ die "--root must be an absolute path\n"
     unless $root =~ m{^/}s;
 $root =~ s{/$}{}gs;
 
+# ルートディレクトリが存在している場合に指定のディレクトリをマウントする。
 if ($opt_umount) {
     die "root does not exist, cowardly refusing to umount\n"
         unless -d $root;
@@ -82,17 +106,21 @@ if ($opt_umount) {
     exit 0;
 }
 
+# 指定されたルートディレクトリを起点にディレクトリを作成
 # create directories
 mkdir_p($root);
 mkdir_p("$root/$_")
     for (@NEWDIRS, @TEMPDIRS);
 
+
+# テンプディレクトリのパーミッションを変更
 # chmod the temporary directories
 for my $dir (@TEMPDIRS) {
     chmod 01777, "$root/$dir"
         or die "failed to chmod $root/$dir:$!";
 }
 
+# コピー対象のファイルのの内、存在している物をルートディレクトリにコピーする
 # copy files
 for my $file (@COPYFILES) {
     run_cmd("cp", "-p", "/$file", "$root/$file")
@@ -101,41 +129,50 @@ for my $file (@COPYFILES) {
 
 # bind the directories
 for my $dir (@BINDDIRS) {
+    # シンボリックリンクである
     if (-l "/$dir") {
+        # コンテナ用の新たなディレクトリがシンボリックリンクでない
         unless (-l "$root/$dir") {
+            # ディレクトリが複数階層である
             if ($dir =~ m{/[^/]+$}s) {
                 mkdir_p("$root/$`");
             }
-            my $dest = readlink("/$dir");
-            defined($dest)
+            my $dest = readlink("/$dir"); # シンボリックリンクの参照先のパスを取得する
+            defined($dest) # 上記で参照先のパスが取得できている or 終了
                 or die "failed to read symlink(/$dir):$!";
-            symlink($dest, "$root/$dir") == 1
+            symlink($dest, "$root/$dir") == 1 # 参照先のパスとコンテナ用に作成したディレクトリをリンクさせる
                 or die "failed to create symlink($root/$dir -> $dest):$!";
         }
     } else {
-        mkdir_p("$root/$dir");
-        if (is_empty("$root/$dir")) {
-            run_cmd("mount", "--bind", "/$dir", "$root/$dir");
-            run_cmd("mount", "-o", "remount,ro,bind", "$root/$dir");
+        mkdir_p("$root/$dir"); # ディレクトリを作成
+        if (is_empty("$root/$dir")) { # 空だったら
+            run_cmd("mount", "--bind", "/$dir", "$root/$dir"); # ホストのディレクトリとコンテナ用のディレクトリをマウント
+            run_cmd("mount", "-o", "remount,ro,bind", "$root/$dir"); # 読み取り専用にするために再度マウントし直す
         }
    }
 }
 
+# 指定のディレクトリを[読み取り]又は[読み書き]でマウントする
 # bind the custom directories
 bind_custom($_, 0)
     for @bind;
 bind_custom($_, 1)
     for @robind;
 
+# ホスト側のロックファイルをマウント
 # create symlinks
 symlink "../run/lock", "$root/var/lock";
 
+# デバイスファイルを作成
 # create devices
 mkdir_p("$root/dev");
+# /dev/nullを作成
 run_cmd(qw(mknod -m 666), "$root/dev/null", qw(c 1 3))
     unless -e "$root/dev/null";
+# /dev/zeroを作成
 run_cmd(qw(mknod -m 666), "$root/dev/zero", qw(c 1 5))
     unless -e "$root/dev/zero";
+# /dev/random, /dev/urandomを作成
 for my $f (qw(random urandom)) {
     run_cmd(qw(mknod -m 444), "$root/dev/$f", qw(c 1 9))
         unless -e "$root/dev/$f";
@@ -147,21 +184,29 @@ if (! @ARGV) {
     exit 0;
 }
 
+# chrootでルートディレクトリを変更
 # chroot and exec
 chroot($root)
     or die "failed to chroot to $root:$!";
+# ルートディレクトリに移動
 chdir "/"
     or die "failed to chroot to /:$!";
+
+# 権限を落とす
 drop_capabilities();
+
+# /bin/bashとか
 exec @ARGV;
 die "failed to exec:$ARGV[0]:$!";
 
+# 任意のコマンドを実行
 sub run_cmd {
     my @argv = @_;
     system(@argv) == 0
         or die "failed to exec $argv[0]:$!";
 }
 
+# 当該ディレクトリが空であるか
 sub is_empty {
     my $path = shift;
     opendir my $fh, $path
@@ -173,17 +218,22 @@ sub is_empty {
     return 1;
 }
 
+# 指定のディレクトリを[読み取り]又は[読み書き]でマウントする
 sub bind_custom {
-    my ($arg, $readonly) = @_;
-    my ($src, $dest) = split ":", $arg, 2;
+    my ($arg, $readonly) = @_; # パス、読み書き
+    my ($src, $dest) = split ":", $arg, 2; # パスを分割
+    # マウント先が指定されていない
     $dest = $src
         unless defined $dest;
+    # 絶対パスでの指定がされていない
     die "paths of `--bind=src-path[:dest-path]` option must be absolute\n"
         unless $src =~ m{^/}s && $dest =~ m{^/}s;
-    $dest =~ s{^/}{}s;
+
+    $dest =~ s{^/}{}s; # 先頭の"/"を削除？
     if (is_empty("$src")) {
-        run_cmd("touch", "$src/.jailing.keep");
+        run_cmd("touch", "$src/.jailing.keep"); # ロックファイル？
     }
+    # 指定のディレクトリをコンテナ用に作成し、ホスト側のディレクトリをマウント(読み取り専用の場合は読み取り専用)
     mkdir_p("$root/$dest");
     if (is_empty("$root/$dest")) {
         run_cmd("mount", "--bind", "$src", "$root/$dest");
@@ -192,29 +242,34 @@ sub bind_custom {
     }
 }
 
+# Capabilityを落とす
 sub drop_capabilities {
     my $i;
     for ($i = 0; ; ++$i) {
-       if (! $KEEP_CAPS{$i}) {
-           # test if capability exists
-           last if syscall(&SYS_prctl, 23, $i) < 0;
-           if (syscall(&SYS_prctl, 24, $i) < 0) {
+        # Capabilityが存在する
+        if (! $KEEP_CAPS{$i}) {
+            # test if capability exists (Kernel: include/uapi/linux/prctl.h)
+            last if syscall(&SYS_prctl, 23, $i) < 0; # 当該権限を保持しているかを確認 #define PR_CAPBSET_READ 23
+            if (syscall(&SYS_prctl, 24, $i) < 0) { # #define PR_CAPBSET_DROP 24
                warn "failed to drop capability:$i";
-           }
-       }
+            }
+        }
     }
+    # 1つも権限を落とすことができなかった場合
     # we should at least succeed in dropping _some_ capabilities
     die "failed to drop capabilities:$!"
         if $i == 0;
 }
 
+
+# mkdir -p: 存在しないフォルダも再帰的に作成していく
 sub mkdir_p {
     my $path = shift;
-    return if -e $path;
+    return if -e $path; # 存在していれば終了
     my $base = $path;
-    $base =~ s{/[^/]+$}{}s;
+    $base =~ s{/[^/]+$}{}s; # 複数階層であれば
     mkdir_p($base)
-        if ! -e $base;
+        if ! -e $base; # 存在していなければ
     mkdir $path
         or die "failed to create directory:$path:$!";
 }
@@ -267,4 +322,3 @@ Kazuho Oku
 =head1 LICENSE
 
 MIT
-
